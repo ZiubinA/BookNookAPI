@@ -156,3 +156,4 @@ D:\BookNookWebAplication\BookNookAPI\bin\Debug\net9.0\Swashbuckle.AspNetCore.Swa
 D:\BookNookWebAplication\BookNookAPI\bin\Debug\net9.0\Swashbuckle.AspNetCore.SwaggerGen.dll
 D:\BookNookWebAplication\BookNookAPI\bin\Debug\net9.0\Swashbuckle.AspNetCore.SwaggerUI.dll
 D:\BookNookWebAplication\BookNookAPI\bin\Debug\net9.0\System.IdentityModel.Tokens.Jwt.dll
+D:\BookNookWebAplication\BookNookAPI\obj\Debug\net9.0\BookNookAPI.sourcelink.json

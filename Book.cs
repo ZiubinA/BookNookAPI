@@ -28,10 +28,11 @@ namespace BookNookAPI
     {
         public int Id { get; set; }
         public string ReviewText { get; set; }
-        public int Rating { get; set; } 
-
+        public int Rating { get; set; }
+        public string? UserId { get; set; }
         // Foreign keys
         public int BookId { get; set; }
-        public Book Book { get; set; }
+        [System.Text.Json.Serialization.JsonIgnore] 
+        public Book? Book { get; set; }
     }
 }

@@ -1,5 +1,6 @@
 using BookNookAPI;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -10,37 +11,44 @@ using System.Text;
 
 var builder = WebApplication.CreateBuilder(args);
 
+//DATABASE SETUP
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
 builder.Services.AddDbContext<ApplicationDbContext>(options =>
 {
     options.UseMySql(connectionString, ServerVersion.AutoDetect(connectionString));
 });
 
+//JSON CONFIG
 builder.Services.Configure<Microsoft.AspNetCore.Http.Json.JsonOptions>(options =>
 {
     options.SerializerOptions.ReferenceHandler = System.Text.Json.Serialization.ReferenceHandler.IgnoreCycles;
 });
 
-builder.Services.AddAuthentication(options =>
-{
-    options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
-    options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
-    options.DefaultScheme = JwtBearerDefaults.AuthenticationScheme;
-}).AddJwtBearer(o =>
-{
-    o.TokenValidationParameters = new TokenValidationParameters
+//AUTHENTICATION (JWT)
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(o =>
     {
-        ValidIssuer = builder.Configuration["Jwt:Issuer"],
-        ValidAudience = builder.Configuration["Jwt:Audience"],
-        IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(builder.Configuration["Jwt:Key"]!)),
-        ValidateIssuer = true,
-        ValidateAudience = true,
-        ValidateLifetime = true,
-        ValidateIssuerSigningKey = true
-    };
-});
-builder.Services.AddAuthorization();
+        o.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidIssuer = builder.Configuration["Jwt:Issuer"],
+            ValidAudience = builder.Configuration["Jwt:Audience"],
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(builder.Configuration["Jwt:Key"]!)),
+            ValidateIssuer = true,
+            ValidateAudience = true,
+            ValidateLifetime = true,
+            ValidateIssuerSigningKey = true,
+            
+            RoleClaimType = ClaimTypes.Role 
+        };
+    });
 
+//AUTHORIZATION (POLICIES)
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy("AdminOnly", policy => policy.RequireRole("Admin"));
+});
+
+//SWAGGER
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(option =>
 {
@@ -48,7 +56,7 @@ builder.Services.AddSwaggerGen(option =>
     option.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
     {
         In = ParameterLocation.Header,
-        Description = "Please enter a valid token",
+        Description = "Please enter token",
         Name = "Authorization",
         Type = SecuritySchemeType.Http,
         BearerFormat = "JWT",
@@ -56,17 +64,12 @@ builder.Services.AddSwaggerGen(option =>
     });
     option.AddSecurityRequirement(new OpenApiSecurityRequirement
     {
-        {
-            new OpenApiSecurityScheme
-            {
-                Reference = new OpenApiReference { Type=ReferenceType.SecurityScheme, Id="Bearer" }
-            },
-            new string[]{}
-        }
+        { new OpenApiSecurityScheme { Reference = new OpenApiReference { Type=ReferenceType.SecurityScheme, Id="Bearer" } }, new string[]{} }
     });
 });
 
 var app = builder.Build();
+
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
@@ -74,170 +77,142 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
-
-app.UseAuthentication(); 
+app.UseAuthentication();
 app.UseAuthorization();
 
-//AUTH ENDPOINT
-
-app.MapPost("/api/login", (UserLogin user, IConfiguration config) =>
+//LOGIN ENDPOINT (UPDATED) 
+app.MapPost("/api/login", (UserLogin loginAttempt, IConfiguration config) =>
 {
-    if (user.Username == "admin" && user.Password == "password123")
+    var users = new List<MockUser>
     {
-        var issuer = config["Jwt:Issuer"];
-        var audience = config["Jwt:Audience"];
-        var key = Encoding.ASCII.GetBytes(config["Jwt:Key"]!);
-        var tokenDescriptor = new SecurityTokenDescriptor
+        new MockUser("admin", "admin123", "Admin", "100"),     
+        new MockUser("user1", "user123", "User", "101"),       
+        new MockUser("alice", "password", "User", "102")      
+    };
+
+    var user = users.FirstOrDefault(u => u.Username == loginAttempt.Username && u.Password == loginAttempt.Password);
+
+    if (user is null) return Results.Unauthorized();
+
+    // Create Token with Role and Id claims
+    var key = Encoding.ASCII.GetBytes(config["Jwt:Key"]!);
+    var tokenDescriptor = new SecurityTokenDescriptor
+    {
+        Subject = new ClaimsIdentity(new[]
         {
-            Subject = new ClaimsIdentity(new[]
-            {
-                new Claim("Id", Guid.NewGuid().ToString()),
-                new Claim(JwtRegisteredClaimNames.Sub, user.Username),
-                new Claim(JwtRegisteredClaimNames.Email, user.Username),
-                new Claim(JwtRegisteredClaimNames.Jti,
-                Guid.NewGuid().ToString())
-             }),
-            Expires = DateTime.UtcNow.AddMinutes(5), // Token lives 5 minutes
-            Issuer = issuer,
-            Audience = audience,
-            SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(key), SecurityAlgorithms.HmacSha512Signature)
-        };
-        var tokenHandler = new JwtSecurityTokenHandler();
-        var token = tokenHandler.CreateToken(tokenDescriptor);
-        var jwtToken = tokenHandler.WriteToken(token);
-        return Results.Ok(new { token = jwtToken });
-    }
-    return Results.Unauthorized();
+            new Claim(JwtRegisteredClaimNames.Sub, user.Username),
+            new Claim(ClaimTypes.Role, user.Role), 
+            new Claim("UserId", user.UserId)        
+        }),
+        Expires = DateTime.UtcNow.AddHours(2),
+        Issuer = config["Jwt:Issuer"],
+        Audience = config["Jwt:Audience"],
+        SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(key), SecurityAlgorithms.HmacSha512Signature)
+    };
+    var tokenHandler = new JwtSecurityTokenHandler();
+    var token = tokenHandler.WriteToken(tokenHandler.CreateToken(tokenDescriptor));
+    return Results.Ok(new { token, user.Role, user.UserId });
 });
 
-//AUTHORS
-
-app.MapGet("/api/authors", async (ApplicationDbContext db) =>
+//  AUTHORS (Admin Only for Changes)
+app.MapGet("/api/authors", async (ApplicationDbContext db) => 
     await db.Authors.Include(a => a.Books).ToListAsync());
 
 app.MapGet("/api/authors/{id}", async (ApplicationDbContext db, int id) =>
-{
-    var author = await db.Authors.Include(a => a.Books).FirstOrDefaultAsync(a => a.Id == id);
-    return author is null ? Results.NotFound() : Results.Ok(author);
-});
+    await db.Authors.Include(a => a.Books).FirstOrDefaultAsync(a => a.Id == id) is Author author ? Results.Ok(author) : Results.NotFound());
 
-app.MapPost("/api/authors", async (ApplicationDbContext db, [FromBody] Author newAuthor) =>
-{
-    db.Authors.Add(newAuthor);
-    await db.SaveChangesAsync();
-    return Results.Created($"/api/authors/{newAuthor.Id}", newAuthor);
-}).RequireAuthorization(); // Secured
+// SECURED: Only Admins can create/edit/delete authors
+app.MapPost("/api/authors", async (ApplicationDbContext db, Author author) => {
+    db.Authors.Add(author); await db.SaveChangesAsync(); return Results.Created($"/api/authors/{author.Id}", author);
+}).RequireAuthorization("AdminOnly");
 
-app.MapPut("/api/authors/{id}", async (ApplicationDbContext db, int id, [FromBody] Author updatedAuthor) =>
-{
-    var author = await db.Authors.FindAsync(id);
-    if (author is null) return Results.NotFound();
-    author.Name = updatedAuthor.Name;
-    await db.SaveChangesAsync();
-    return Results.Ok(author);
-}).RequireAuthorization(); // Secured
+app.MapPut("/api/authors/{id}", async (ApplicationDbContext db, int id, Author updated) => {
+    var a = await db.Authors.FindAsync(id); if (a is null) return Results.NotFound();
+    a.Name = updated.Name; await db.SaveChangesAsync(); return Results.Ok(a);
+}).RequireAuthorization("AdminOnly");
 
-app.MapDelete("/api/authors/{id}", async (ApplicationDbContext db, int id) =>
-{
-    var author = await db.Authors.FindAsync(id);
-    if (author is null) return Results.NotFound();
-    db.Authors.Remove(author);
-    await db.SaveChangesAsync();
-    return Results.NoContent();
-}).RequireAuthorization(); // Secured
+app.MapDelete("/api/authors/{id}", async (ApplicationDbContext db, int id) => {
+    var a = await db.Authors.FindAsync(id); if (a is null) return Results.NotFound();
+    db.Authors.Remove(a); await db.SaveChangesAsync(); return Results.NoContent();
+}).RequireAuthorization("AdminOnly");
 
-app.MapGet("/api/authors/{authorId}/books", async (ApplicationDbContext db, int authorId) =>
-{
-    if (!await db.Authors.AnyAsync(a => a.Id == authorId)) return Results.NotFound("Author not found.");
-    return Results.Ok(await db.Books.Where(b => b.AuthorId == authorId).ToListAsync());
-});
-
-//BOOKS 
-
-app.MapGet("/api/books", async (ApplicationDbContext db) =>
+// BOOKS (Admin Only for Changes)
+app.MapGet("/api/books", async (ApplicationDbContext db) => 
     await db.Books.Include(b => b.Author).Include(b => b.Reviews).ToListAsync());
 
 app.MapGet("/api/books/{id}", async (ApplicationDbContext db, int id) =>
+    await db.Books.Include(b => b.Author).Include(b => b.Reviews).FirstOrDefaultAsync(b => b.Id == id) is Book book ? Results.Ok(book) : Results.NotFound());
+
+// SECURED: Only Admins can create/edit/delete books
+app.MapPost("/api/books", async (ApplicationDbContext db, Book book) => {
+    if (!await db.Authors.AnyAsync(a => a.Id == book.AuthorId)) return Results.BadRequest("Invalid AuthorId");
+    db.Books.Add(book); await db.SaveChangesAsync(); return Results.Created($"/api/books/{book.Id}", book);
+}).RequireAuthorization("AdminOnly");
+
+app.MapPut("/api/books/{id}", async (ApplicationDbContext db, int id, Book updated) => {
+    var b = await db.Books.FindAsync(id); if (b is null) return Results.NotFound();
+    b.Title = updated.Title; b.Genre = updated.Genre; b.Description = updated.Description; b.AuthorId = updated.AuthorId;
+    await db.SaveChangesAsync(); return Results.Ok(b);
+}).RequireAuthorization("AdminOnly");
+
+app.MapDelete("/api/books/{id}", async (ApplicationDbContext db, int id) => {
+    var b = await db.Books.FindAsync(id); if (b is null) return Results.NotFound();
+    db.Books.Remove(b); await db.SaveChangesAsync(); return Results.NoContent();
+}).RequireAuthorization("AdminOnly");
+
+// REVIEWS (User owned, Admin managed)
+app.MapGet("/api/reviews", async (ApplicationDbContext db) => await db.Reviews.Include(r => r.Book).ToListAsync());
+
+app.MapPost("/api/reviews", [Authorize] async (ApplicationDbContext db, ClaimsPrincipal user, Review review) =>
 {
-    var book = await db.Books.Include(b => b.Author).Include(b => b.Reviews).FirstOrDefaultAsync(b => b.Id == id);
-    return book is null ? Results.NotFound() : Results.Ok(book);
+    if (!await db.Books.AnyAsync(b => b.Id == review.BookId)) return Results.BadRequest("Invalid BookId.");
+    var userId = user.FindFirstValue("UserId");
+    review.UserId = userId; 
+
+    db.Reviews.Add(review);
+    await db.SaveChangesAsync();
+    return Results.Created($"/api/reviews/{review.Id}", review);
 });
 
-app.MapPost("/api/books", async (ApplicationDbContext db, [FromBody] Book newBook) =>
-{
-    if (!await db.Authors.AnyAsync(a => a.Id == newBook.AuthorId)) return Results.BadRequest("Invalid AuthorId.");
-    db.Books.Add(newBook);
-    await db.SaveChangesAsync();
-    return Results.Created($"/api/books/{newBook.Id}", newBook);
-}).RequireAuthorization(); // Secured
-
-app.MapPut("/api/books/{id}", async (ApplicationDbContext db, int id, [FromBody] Book updatedBook) =>
-{
-    var book = await db.Books.FindAsync(id);
-    if (book is null) return Results.NotFound();
-    if (!await db.Authors.AnyAsync(a => a.Id == updatedBook.AuthorId)) return Results.BadRequest("Invalid AuthorId.");
-    book.Title = updatedBook.Title;
-    book.Genre = updatedBook.Genre;
-    book.Description = updatedBook.Description;
-    book.AuthorId = updatedBook.AuthorId;
-    await db.SaveChangesAsync();
-    return Results.Ok(book);
-}).RequireAuthorization(); // Secured
-
-app.MapDelete("/api/books/{id}", async (ApplicationDbContext db, int id) =>
-{
-    var book = await db.Books.FindAsync(id);
-    if (book is null) return Results.NotFound();
-    db.Books.Remove(book);
-    await db.SaveChangesAsync();
-    return Results.NoContent();
-}).RequireAuthorization(); // Secured
-
-app.MapGet("/api/books/{bookId}/reviews", async (ApplicationDbContext db, int bookId) =>
-{
-    if (!await db.Books.AnyAsync(b => b.Id == bookId)) return Results.NotFound("Book not found.");
-    return Results.Ok(await db.Reviews.Where(r => r.BookId == bookId).ToListAsync());
-});
-
-//REVIEWS 
-
-app.MapGet("/api/reviews", async (ApplicationDbContext db) =>
-    await db.Reviews.Include(r => r.Book).ToListAsync());
-
-app.MapGet("/api/reviews/{id}", async (ApplicationDbContext db, int id) =>
-{
-    var review = await db.Reviews.Include(r => r.Book).FirstOrDefaultAsync(r => r.Id == id);
-    return review is null ? Results.NotFound() : Results.Ok(review);
-});
-
-app.MapPost("/api/reviews", async (ApplicationDbContext db, [FromBody] Review newReview) =>
-{
-    if (!await db.Books.AnyAsync(b => b.Id == newReview.BookId)) return Results.BadRequest("Invalid BookId.");
-    db.Reviews.Add(newReview);
-    await db.SaveChangesAsync();
-    return Results.Created($"/api/reviews/{newReview.Id}", newReview);
-}).RequireAuthorization(); // Secured
-
-app.MapPut("/api/reviews/{id}", async (ApplicationDbContext db, int id, [FromBody] Review updatedReview) =>
+app.MapPut("/api/reviews/{id}", [Authorize] async (ApplicationDbContext db, ClaimsPrincipal user, int id, Review updated) =>
 {
     var review = await db.Reviews.FindAsync(id);
     if (review is null) return Results.NotFound();
-    if (!await db.Books.AnyAsync(b => b.Id == updatedReview.BookId)) return Results.BadRequest("Invalid BookId.");
-    review.Rating = updatedReview.Rating;
-    review.ReviewText = updatedReview.ReviewText;
-    review.BookId = updatedReview.BookId;
+    var currentUserId = user.FindFirstValue("UserId");
+    var isAdmin = user.IsInRole("Admin");
+
+    if (review.UserId != currentUserId && !isAdmin)
+    {
+        return Results.Forbid(); 
+    }
+
+    review.Rating = updated.Rating;
+    review.ReviewText = updated.ReviewText;
     await db.SaveChangesAsync();
     return Results.Ok(review);
-}).RequireAuthorization(); // Secured
+});
 
-app.MapDelete("/api/reviews/{id}", async (ApplicationDbContext db, int id) =>
+// DELETE REVIEW
+app.MapDelete("/api/reviews/{id}", [Authorize] async (ApplicationDbContext db, ClaimsPrincipal user, int id) =>
 {
     var review = await db.Reviews.FindAsync(id);
     if (review is null) return Results.NotFound();
+
+    var currentUserId = user.FindFirstValue("UserId");
+    var isAdmin = user.IsInRole("Admin");
+
+    if (review.UserId != currentUserId && !isAdmin)
+    {
+         return Results.Forbid();
+    }
+
     db.Reviews.Remove(review);
     await db.SaveChangesAsync();
     return Results.NoContent();
-}).RequireAuthorization(); // Secured
+});
 
 app.Run();
+
+// Helper records
 public record UserLogin(string Username, string Password);
+public record MockUser(string Username, string Password, string Role, string UserId);
