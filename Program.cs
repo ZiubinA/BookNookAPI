@@ -81,37 +81,85 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 //LOGIN ENDPOINT (UPDATED) 
-app.MapPost("/api/login", (UserLogin loginAttempt, IConfiguration config) =>
+app.MapPost("/api/login", async (UserLogin loginAttempt, IConfiguration config, ApplicationDbContext db) =>
 {
+    //Validate User
+    var users = new List<MockUser>
+    {
+        new MockUser("admin", "admin123", "Admin", "100"),
+        new MockUser("user1", "user123", "User", "101"),
+        new MockUser("alice", "password", "User", "102")
+    };
+
+    var user = users.FirstOrDefault(u => u.Username == loginAttempt.Username && u.Password == loginAttempt.Password);
+    if (user is null) return Results.Unauthorized();
+
+    //Generate Tokens
+    var accessToken = GenerateAccessToken(user, config);
+    var refreshToken = GenerateRefreshToken();
+
+    //Save Refresh Token to Database
+    var refreshTokenEntity = new RefreshToken
+    {
+        Token = refreshToken,
+        UserId = user.UserId,
+        Expires = DateTime.UtcNow.AddDays(1),
+        IsRevoked = false
+    };
+
+    db.RefreshTokens.Add(refreshTokenEntity);
+    await db.SaveChangesAsync();
+
+    return Results.Ok(new { accessToken, refreshToken, user.Role, user.UserId });
+});
+
+app.MapPost("/api/refresh-token", async (RefreshTokenRequest request, IConfiguration config, ApplicationDbContext db) =>
+{
+    //Find the Refresh Token in the DB
+    var storedToken = await db.RefreshTokens.FirstOrDefaultAsync(rt => rt.Token == request.RefreshToken);
+
+    //Validation Checks
+    if (storedToken is null || storedToken.IsRevoked)
+    {
+        return Results.BadRequest("Invalid token");
+    }
+
+    if (storedToken.Expires < DateTime.UtcNow)
+    {
+        return Results.BadRequest("Token expired");
+    }
+
+    //Find the associated User 
     var users = new List<MockUser>
     {
         new MockUser("admin", "admin123", "Admin", "100"),     
         new MockUser("user1", "user123", "User", "101"),       
         new MockUser("alice", "password", "User", "102")      
     };
-
-    var user = users.FirstOrDefault(u => u.Username == loginAttempt.Username && u.Password == loginAttempt.Password);
-
+    
+    var user = users.FirstOrDefault(u => u.UserId == storedToken.UserId);
     if (user is null) return Results.Unauthorized();
 
-    // Create Token with Role and Id claims
-    var key = Encoding.ASCII.GetBytes(config["Jwt:Key"]!);
-    var tokenDescriptor = new SecurityTokenDescriptor
+    //Generate NEW Access Token & Rotate Refresh Token
+    var newAccessToken = GenerateAccessToken(user, config);
+    var newRefreshToken = GenerateRefreshToken();
+
+    // Revoke the old one
+    storedToken.IsRevoked = true;
+
+    // Save the new one
+    var newRefreshTokenEntity = new RefreshToken
     {
-        Subject = new ClaimsIdentity(new[]
-        {
-            new Claim(JwtRegisteredClaimNames.Sub, user.Username),
-            new Claim(ClaimTypes.Role, user.Role), 
-            new Claim("UserId", user.UserId)        
-        }),
-        Expires = DateTime.UtcNow.AddHours(2),
-        Issuer = config["Jwt:Issuer"],
-        Audience = config["Jwt:Audience"],
-        SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(key), SecurityAlgorithms.HmacSha512Signature)
+        Token = newRefreshToken,
+        UserId = user.UserId,
+        Expires = DateTime.UtcNow.AddDays(1),
+        IsRevoked = false
     };
-    var tokenHandler = new JwtSecurityTokenHandler();
-    var token = tokenHandler.WriteToken(tokenHandler.CreateToken(tokenDescriptor));
-    return Results.Ok(new { token, user.Role, user.UserId });
+    
+    db.RefreshTokens.Add(newRefreshTokenEntity);
+    await db.SaveChangesAsync();
+
+    return Results.Ok(new { accessToken = newAccessToken, refreshToken = newRefreshToken });
 });
 
 //  AUTHORS (Admin Only for Changes)
@@ -211,8 +259,39 @@ app.MapDelete("/api/reviews/{id}", [Authorize] async (ApplicationDbContext db, C
     return Results.NoContent();
 });
 
+
+string GenerateAccessToken(MockUser user, IConfiguration config)
+{
+    var key = Encoding.ASCII.GetBytes(config["Jwt:Key"]!);
+    var tokenDescriptor = new SecurityTokenDescriptor
+    {
+        Subject = new ClaimsIdentity(new[]
+        {
+            new Claim(JwtRegisteredClaimNames.Sub, user.Username),
+            new Claim(ClaimTypes.Role, user.Role),
+            new Claim("UserId", user.UserId)
+        }),
+        Expires = DateTime.UtcNow.AddMinutes(1), 
+        Issuer = config["Jwt:Issuer"],
+        Audience = config["Jwt:Audience"],
+        SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(key), SecurityAlgorithms.HmacSha512Signature)
+    };
+    var tokenHandler = new JwtSecurityTokenHandler();
+    return tokenHandler.WriteToken(tokenHandler.CreateToken(tokenDescriptor));
+}
+
+string GenerateRefreshToken()
+{
+    var randomNumber = new byte[32];
+    using var rng = System.Security.Cryptography.RandomNumberGenerator.Create();
+    rng.GetBytes(randomNumber);
+    return Convert.ToBase64String(randomNumber);
+}
+
+
 app.Run();
 
 // Helper records
+public record RefreshTokenRequest(string RefreshToken);
 public record UserLogin(string Username, string Password);
 public record MockUser(string Username, string Password, string Role, string UserId);

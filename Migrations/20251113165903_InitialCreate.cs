@@ -64,6 +64,8 @@ namespace BookNookAPI.Migrations
                     ReviewText = table.Column<string>(type: "longtext", nullable: false)
                         .Annotation("MySql:CharSet", "utf8mb4"),
                     Rating = table.Column<int>(type: "int", nullable: false),
+                    UserId = table.Column<string>(type: "longtext", nullable: true)
+                        .Annotation("MySql:CharSet", "utf8mb4"),
                     BookId = table.Column<int>(type: "int", nullable: false)
                 },
                 constraints: table =>
